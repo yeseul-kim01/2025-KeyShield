@@ -30,20 +30,29 @@
   
       return false;
     };
+
+/**
+ * 정규식 기반 secret 패턴 탐지
+ * @param {string} normalizedText 공백 정리된 텍스트
+ * @param {string} compactText 공백 제거된 텍스트 (JWT 전용)
+ * @return {object} regexSignals
+ */
+const detectRegexSignals = (normalizedText, compactText) => {
+    return {
+      // AWS Access Key ID (AKIA로 시작하는 20자 키)
+      awsAccessKey: /AKIA[0-9A-Z]{16}/.test(normalizedText),
   
-    /**
-     * 정규식 기반 secret 패턴 탐지
-     * 원문은 반환/저장하지 않고 boolean 신호만 생성
-     * @param {string} text
-     * @returns {object} signals
-     */
-    const detectRegexSignals = (text) => {
-      return {
-        awsAccessKey: /AKIA[0-9A-Z]{16}/.test(text),
-        jwtToken: /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(compactText),
-        pemHeader: /-----BEGIN (RSA|EC|DSA)? ?PRIVATE KEY-----/.test(text),
-      };
+      // JWT: 줄바꿈/공백이 있어도 탐지되도록 compactText 사용
+      jwtToken: /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(
+        compactText
+      ),
+  
+      // PEM Private Key Header
+      pemHeader:
+        /-----BEGIN (RSA|EC|DSA)? ?PRIVATE KEY-----/.test(normalizedText),
     };
+  };
+  
 
       /**
      * riskScore 계산 (0~100)
@@ -130,7 +139,7 @@
 
   
         // 정규식 기반 탐지 시그널 생성
-        const regexSignals = detectRegexSignals(normalizedText);
+        const regexSignals = detectRegexSignals(normalizedText, compactText);
 
         // entropy 계산
         const entropy = calcShannonEntropy(normalizedText);
