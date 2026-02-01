@@ -117,16 +117,19 @@
         const target = e.target;
         if (!isEditableTarget(target)) return;
   
-       // 정규식 탐지 전 정규화: 줄바꿈/탭 → 공백, 연속 공백 정리
+        const text = e.clipboardData?.getData("text") ?? "";
+        if (!text) return;
+
+        // 정규식 탐지 전 정규화: 줄바꿈/탭 → 공백, 연속 공백 정리
         const normalizedText = text
-            .replace(/\s+/g, " ")
-            .trim();
+        .replace(/\s+/g, " ")
+        .trim();
   
         // 정규식 기반 탐지 시그널 생성
-        const regexSignals = detectRegexSignals(normalizedText);
+        const regexSignals = detectRegexSignals(text);
 
         // entropy 계산
-        const entropy = calcShannonEntropy(normalizedText);
+        const entropy = calcShannonEntropy(text);
 
         // risk score 생성
         const riskScore = calcRiskScore({
