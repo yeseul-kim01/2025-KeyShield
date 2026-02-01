@@ -1,0 +1,12 @@
+name: KeyShield CI
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - name: CI placeholder
+        run: echo "CI checks will be added per component"
