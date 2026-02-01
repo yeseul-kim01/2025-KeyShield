@@ -126,10 +126,10 @@
         .trim();
   
         // 정규식 기반 탐지 시그널 생성
-        const regexSignals = detectRegexSignals(text);
+        const regexSignals = detectRegexSignals(normalizedText);
 
         // entropy 계산
-        const entropy = calcShannonEntropy(text);
+        const entropy = calcShannonEntropy(normalizedText);
 
         // risk score 생성
         const riskScore = calcRiskScore({
