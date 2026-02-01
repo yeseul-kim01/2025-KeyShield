@@ -40,7 +40,7 @@
     const detectRegexSignals = (text) => {
       return {
         awsAccessKey: /AKIA[0-9A-Z]{16}/.test(text),
-        jwtToken: /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(text),
+        jwtToken: /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(compactText),
         pemHeader: /-----BEGIN (RSA|EC|DSA)? ?PRIVATE KEY-----/.test(text),
       };
     };
@@ -124,6 +124,10 @@
         const normalizedText = text
         .replace(/\s+/g, " ")
         .trim();
+
+        // JWT 탐지용: 공백/줄바꿈 완전 제거 (dot 사이에 끼는 공백 제거 목적)
+        const compactText = text.replace(/\s+/g, "");
+
   
         // 정규식 기반 탐지 시그널 생성
         const regexSignals = detectRegexSignals(normalizedText);
@@ -146,13 +150,7 @@
             riskScore,
             signals: regexSignals,
         });
-  
-        // 원문 없이 요약 정보만 로그
-        log("paste detected (regex signals)", {
-          url: location.href,
-          length: text.length,
-          signals: regexSignals,
-        });
+
       },
       true
     );
