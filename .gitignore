@@ -1,0 +1,36 @@
+# env
+.env
+.env.*
+**/*.env
+
+# secrets / keys
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+**/application-*.yml
+**/application-*.yaml
+
+# node
+node_modules/
+dist/
+build/
+.next/
+out/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# java
+.gradle/
+build/
+out/
+*.iml
+.idea/
+
+# os
+.DS_Store
