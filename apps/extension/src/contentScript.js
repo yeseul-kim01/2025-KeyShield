@@ -36,7 +36,6 @@
     };
 
     // 1) AWS Access Key ID 마스킹 (AKIA + 16 chars)
-    // - 예: AKIA1234... → AKIA****************
     maskedText = maskedText.replace(/AKIA[0-9A-Z]{16}/g, (match) => {
       masked.aws = true;
 
@@ -48,7 +47,6 @@
 
     // 2) JWT 마스킹
     // - 문장 중간에 포함되어 있어도 통째로 치환
-    // - 예: eyJxxx.yyy.zzz → <REDACTED_JWT>
     maskedText = maskedText.replace(
       /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
       () => {
@@ -176,6 +174,70 @@
     return Math.max(0, Math.min(100, score));
   };
 
+
+    /**
+   * 간단 토스트(페이지 내 오버레이)
+   * - 원문 노출 금지
+   * - 너무 자주 뜨지 않도록 중복 방지
+   */
+  const showToast = (() => {
+    let lastToastAt = 0;
+    let toastEl = null;
+
+    const ensureEl = () => {
+      if (toastEl && document.body.contains(toastEl)) return toastEl;
+
+      toastEl = document.createElement("div");
+      toastEl.setAttribute("data-keyshield-toast", "1");
+      toastEl.style.cssText = `
+        position: fixed;
+        z-index: 2147483647;
+        right: 16px;
+        bottom: 16px;
+        max-width: 360px;
+        padding: 12px 14px;
+        border-radius: 10px;
+        background: rgba(17, 17, 17, 0.92);
+        color: #fff;
+        font-size: 13px;
+        line-height: 1.35;
+        box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+        opacity: 0;
+        transform: translateY(6px);
+        transition: opacity 160ms ease, transform 160ms ease;
+        pointer-events: none;
+        white-space: pre-line;
+      `;
+
+      document.documentElement.appendChild(toastEl);
+      return toastEl;
+    };
+
+    return (message) => {
+      const now = Date.now();
+      // 600ms 이내 연타 방지
+      if (now - lastToastAt < 600) return;
+      lastToastAt = now;
+
+      const el = ensureEl();
+      el.textContent = message;
+
+      // show
+      requestAnimationFrame(() => {
+        el.style.opacity = "1";
+        el.style.transform = "translateY(0)";
+      });
+
+      // hide
+      setTimeout(() => {
+        if (!toastEl) return;
+        toastEl.style.opacity = "0";
+        toastEl.style.transform = "translateY(6px)";
+      }, 2200);
+    };
+  })();
+
+
   /**
    * 최종 Secret 판정
    * - regex 신호 + entropy 기준을 함께 사용
@@ -233,13 +295,13 @@
         entropy,
         length: compactText.length,
       });
-
-      console.log("KeyShield Debug:", {
-        regexSignals,
-        entropy,
-        riskScore,
-        secretDetected,
-      });
+      // debug용 전체 정보 출력 - 주석 처리
+      // console.log("KeyShield Debug:", {
+      //   regexSignals,
+      //   entropy,
+      //   riskScore,
+      //   secretDetected,
+      // });
 
       // past 이벤트 기본 동작 차단
       // if (secretDetected) {
