@@ -13,6 +13,18 @@
     else console.log(LOG_PREFIX, message);
   };
 
+
+    /**
+   * (임시) 도메인 allowlist
+   * - TODO: 다음 이슈에서 chrome.storage 기반으로 교체
+   */
+  const isAllowlistedDomain = (host) => {
+    // 예: 내부 개발환경/로컬은 허용하고 싶다 이런거
+    const allow = new Set(["localhost", "127.0.0.1"]);
+    return allow.has(host);
+  };
+
+
     /**
    * Secret 마스킹 유틸
    * - 원문을 저장/전송/로그 출력하지 않음
@@ -176,6 +188,48 @@
 
 
     /**
+   * 사이트 정책 읽기
+   * - TODO: 다음 이슈에서 chrome.storage.sync/local로 구현
+   */
+  const getSitePolicy = (host) => {
+    return {
+      mode: "mask", // "allow" | "mask" | "block" | "detect-only"
+      maskTypes: { aws: true, jwt: true, pem: true },
+    };
+  };
+
+
+
+
+    /**
+   * 정책 결정
+   * - 지금 이슈 범위에서는 기본 정책만 고정
+   * - TODO: 다음 이슈에서 site별 설정 / detect-only / allowlist 등을 붙일 자리
+   *
+   * @param {{secretDetected:boolean, regexSignals:any, riskScore:number, entropy:number, length:number}} ctx
+   * @returns {{ action: "allow" | "mask" | "block", reason: string }}
+   */
+  const decideEnforcement = (ctx) => {
+    const { secretDetected, regexSignals, riskScore } = ctx;
+    if (isAllowlistedDomain(location.hostname)) return { action: "allow", reason: "allowlisted_domain" };
+    if (!secretDetected) return { action: "allow", reason: "no_secret" };
+
+    // 강한 시그널은 무조건 mask (지금 정책)
+    if (regexSignals.pemHeader) return { action: "block", reason: "pem_private_key" }; 
+    // PEM은 마스킹으로 넣는 순간 사용자 경험/보안상 애매해서 block로 두는 게 보통 더 안전함.
+
+    if (regexSignals.awsAccessKey) return { action: "mask", reason: "aws_access_key" };
+    if (regexSignals.jwtToken) return { action: "mask", reason: "jwt_token" };
+
+    // 엔트로피만 높은 경우는 마스킹 대신 경고만? → 지금 이슈에서는 allow로 두는 것도 방법
+    if (riskScore >= 70) return { action: "mask", reason: "high_risk_string" };
+
+    return { action: "allow", reason: "low_confidence" };
+  };
+
+
+
+    /**
    * 간단 토스트(페이지 내 오버레이)
    * - 원문 노출 금지
    * - 너무 자주 뜨지 않도록 중복 방지
@@ -271,88 +325,88 @@
     (e) => {
       const target = e.target;
       if (!isEditableTarget(target)) return;
-
+  
       const text = e.clipboardData?.getData("text") ?? "";
       if (!text) return;
-
+  
       // 정규화
       const normalizedText = text.replace(/\s+/g, " ").trim();
       const compactText = text.replace(/\s+/g, "");
-
+  
       const regexSignals = detectRegexSignals(normalizedText, compactText);
-
-      //토큰류 판별 compactText entropy
       const entropy = calcShannonEntropy(compactText);
-
+  
       const riskScore = calcRiskScore({
         length: compactText.length,
         entropy,
         regexSignals,
       });
-
+  
       const secretDetected = isSecretCandidate({
         regexSignals,
         entropy,
         length: compactText.length,
       });
-      // debug용 전체 정보 출력 - 주석 처리
-      // console.log("KeyShield Debug:", {
-      //   regexSignals,
-      //   entropy,
-      //   riskScore,
-      //   secretDetected,
-      // });
-
-      // past 이벤트 기본 동작 차단
-      // if (secretDetected) {
-      //   e.preventDefault();
-
-      //   log("paste blocked (secret detected)", {
-      //     url: location.href,
-      //     length: compactText.length,
-      //     entropy,
-      //     riskScore,
-      //     signals: regexSignals,
-      //   });
-      //   return;
-      // }
-
-
-      // Secret이 탐지된 경우 마스킹 처리 후 삽입
-      // feat # 14 : 원본 paste 차단 + 마스킹 텍스트 삽입
-      if (secretDetected) {
-        // 원본 paste 차단
-        e.preventDefault();
-      
-        // 마스킹 치환
+  
+      // 정책 결정
+      const { action, reason } = decideEnforcement({
+        secretDetected,
+        regexSignals,
+        riskScore,
+        entropy,
+        length: compactText.length,
+      });
+  
+      // allow: 그냥 통과
+      if (action === "allow") {
+        log("paste allowed", {
+          url: location.href,
+          length: compactText.length,
+          entropy,
+          riskScore,
+          reason,
+          signals: regexSignals,
+        });
+        return;
+      }
+  
+      // block / mask: 원본 paste 차단
+      e.preventDefault();
+  
+      // block
+      if (action === "block") {
+        showToast("KeyShield: 민감 정보로 의심되어 붙여넣기가 차단되었습니다.");
+        log("paste blocked (secret detected)", {
+          url: location.href,
+          length: compactText.length,
+          entropy,
+          riskScore,
+          reason,
+          signals: regexSignals,
+        });
+        return;
+      }
+  
+      // mask
+      if (action === "mask") {
         const { maskedText, masked } = maskSecretsInText(text);
-      
-        // input/textarea에 마스킹 텍스트 삽입
         const inserted = insertTextIntoInput(target, maskedText);
-      
+  
+        showToast("KeyShield: 민감 정보로 의심되어 일부가 마스킹 처리되었습니다.");
+  
         log("paste masked (secret detected)", {
           url: location.href,
           inserted,
-          length: maskedText.length, // 마스킹 결과 길이
+          length: maskedText.length,
           entropy,
           riskScore,
+          reason,
           masked, // {aws, jwt, pem}
           signals: regexSignals,
         });
-      
         return;
       }
-      
-
-      // 디버깅용(원문 없음)
-      log("paste allowed", {
-        url: location.href,
-        length: compactText.length,
-        entropy,
-        riskScore,
-        signals: regexSignals,
-      });
     },
     true
-  );
+  );  
 })();
