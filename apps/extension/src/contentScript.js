@@ -13,6 +13,65 @@
     else console.log(LOG_PREFIX, message);
   };
 
+    /**
+   * Secret 마스킹 유틸
+   * - 원문을 저장/전송/로그 출력하지 않음
+   * - 문자열 내 Secret 패턴만 치환하여 "마스킹된 텍스트"를 반환
+   * - 이 함수는 "치환 로직만" 담당 (paste 이벤트 처리와 분리)
+   *
+   * @param {string} rawText
+   * @returns {{ maskedText: string, masked: { aws: boolean, jwt: boolean, pem: boolean } }}
+   */
+  const maskSecretsInText = (rawText) => {
+    if (!rawText) {
+      return { maskedText: "", masked: { aws: false, jwt: false, pem: false } };
+    }
+
+    let maskedText = rawText;
+
+    const masked = {
+      aws: false,
+      jwt: false,
+      pem: false,
+    };
+
+    // 1) AWS Access Key ID 마스킹 (AKIA + 16 chars)
+    // - 예: AKIA1234... → AKIA****************
+    maskedText = maskedText.replace(/AKIA[0-9A-Z]{16}/g, (match) => {
+      masked.aws = true;
+
+      // prefix는 유지, 나머지는 *로 치환 (총 길이 맞춰줌)
+      const prefix = match.slice(0, 4); // "AKIA"
+      const stars = "*".repeat(Math.max(0, match.length - prefix.length));
+      return prefix + stars;
+    });
+
+    // 2) JWT 마스킹
+    // - 문장 중간에 포함되어 있어도 통째로 치환
+    // - 예: eyJxxx.yyy.zzz → <REDACTED_JWT>
+    maskedText = maskedText.replace(
+      /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
+      () => {
+        masked.jwt = true;
+        return "<REDACTED_JWT>";
+      }
+    );
+
+    // 3) PEM Private Key 마스킹
+    // - 멀티라인 블록 전체를 치환
+    // - BEGIN/END 헤더가 있을 때만 동작
+    maskedText = maskedText.replace(
+      /-----BEGIN (RSA|EC|DSA)? ?PRIVATE KEY-----[\s\S]*?-----END (RSA|EC|DSA)? ?PRIVATE KEY-----/g,
+      () => {
+        masked.pem = true;
+        return "<REDACTED_PRIVATE_KEY>";
+      }
+    );
+
+    return { maskedText, masked };
+  };
+
+
   /**
    * 붙여넣기 대상이 입력 가능한 영역인지 판단
    * (Out of Scope: contenteditable, role=textbox)
