@@ -34,3 +34,9 @@ out/
 
 # os
 .DS_Store
+
+#
+pdp/*
+.apps/pdp/*
+apps/pdp/*
+apps/pdp
