@@ -72,6 +72,30 @@
   };
 
 
+    /**
+   * input/textarea에 텍스트를 커서 위치에 삽입
+   * - setRangeText를 우선 사용 (가장 깔끔)
+   * @param {HTMLInputElement|HTMLTextAreaElement} el
+   * @param {string} text
+   * @returns {boolean} 성공 여부
+   */
+  const insertTextIntoInput = (el, text) => {
+    try {
+      const start = typeof el.selectionStart === "number" ? el.selectionStart : el.value.length;
+      const end = typeof el.selectionEnd === "number" ? el.selectionEnd : el.value.length;
+
+      // setRangeText는 selection을 유지/이동 옵션 지정 가능
+      el.setRangeText(text, start, end, "end");
+
+      // input 이벤트를 발생시켜 React/Vue 등 프레임워크 바인딩도 반영되게
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      return true;
+    } catch (err) {
+      return false;
+    }
+  };
+
+
   /**
    * 붙여넣기 대상이 입력 가능한 영역인지 판단
    * (Out of Scope: contenteditable, role=textbox)
@@ -158,15 +182,25 @@
    * - 원문 저장/전송/로그 금지
    */
   const isSecretCandidate = ({ regexSignals, entropy, length }) => {
-    const hasStrongSignal =
-      regexSignals.awsAccessKey || regexSignals.jwtToken || regexSignals.pemHeader;
-
-    if (!hasStrongSignal) return false;
+    // 너무 짧으면 컷
     if (length < 20) return false;
-
-    // 기본 컷(추후 정책화)
-    return entropy >= 4.7;
+  
+    // 1) 강한 정규식 시그널은 entropy 무시
+    if (
+      regexSignals.awsAccessKey ||
+      regexSignals.pemHeader
+    ) {
+      return true;
+    }
+  
+    // 2) JWT는 entropy까지 같이 본다 (오탐 방지)
+    if (regexSignals.jwtToken && entropy >= 4.5) {
+      return true;
+    }
+  
+    return false;
   };
+  
 
   log("content script injected", { url: location.href });
 
@@ -200,18 +234,53 @@
         length: compactText.length,
       });
 
-      if (secretDetected) {
-        e.preventDefault();
+      console.log("KeyShield Debug:", {
+        regexSignals,
+        entropy,
+        riskScore,
+        secretDetected,
+      });
 
-        log("paste blocked (secret detected)", {
+      // past 이벤트 기본 동작 차단
+      // if (secretDetected) {
+      //   e.preventDefault();
+
+      //   log("paste blocked (secret detected)", {
+      //     url: location.href,
+      //     length: compactText.length,
+      //     entropy,
+      //     riskScore,
+      //     signals: regexSignals,
+      //   });
+      //   return;
+      // }
+
+
+      // Secret이 탐지된 경우 마스킹 처리 후 삽입
+      // feat # 14 : 원본 paste 차단 + 마스킹 텍스트 삽입
+      if (secretDetected) {
+        // 원본 paste 차단
+        e.preventDefault();
+      
+        // 마스킹 치환
+        const { maskedText, masked } = maskSecretsInText(text);
+      
+        // input/textarea에 마스킹 텍스트 삽입
+        const inserted = insertTextIntoInput(target, maskedText);
+      
+        log("paste masked (secret detected)", {
           url: location.href,
-          length: compactText.length,
+          inserted,
+          length: maskedText.length, // 마스킹 결과 길이
           entropy,
           riskScore,
+          masked, // {aws, jwt, pem}
           signals: regexSignals,
         });
+      
         return;
       }
+      
 
       // 디버깅용(원문 없음)
       log("paste allowed", {
