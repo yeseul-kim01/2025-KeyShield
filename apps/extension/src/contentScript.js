@@ -47,25 +47,22 @@
       pem: false,
     };
 
-    // 1) AWS Access Key ID 마스킹 (AKIA + 16 chars)
-    maskedText = maskedText.replace(/AKIA[0-9A-Z]{16}/g, (match) => {
-      masked.aws = true;
+    // 1) AWS Access Key ID 마스킹 (공백/개행 허용)
+    const AWS_ACCESS_KEY_FUZZY = /A\s*K\s*I\s*A(?:\s*[0-9A-Z]){16}/g;
 
-      // prefix는 유지, 나머지는 *로 치환 (총 길이 맞춰줌)
-      const prefix = match.slice(0, 4); // "AKIA"
-      const stars = "*".repeat(Math.max(0, match.length - prefix.length));
-      return prefix + stars;
+    maskedText = maskedText.replace(AWS_ACCESS_KEY_FUZZY, () => {
+      masked.aws = true;
+      return "AKIA" + "*".repeat(16);
     });
 
-    // 2) JWT 마스킹
-    // - 문장 중간에 포함되어 있어도 통째로 치환
-    maskedText = maskedText.replace(
-      /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
-      () => {
-        masked.jwt = true;
-        return "<REDACTED_JWT>";
-      }
-    );
+    // 2) JWT 마스킹 (공백/개행 허용)
+    const JWT_FUZZY = /eyJ[A-Za-z0-9_-]+(?:\s*\.\s*[A-Za-z0-9_-]+){2}/g;
+
+    maskedText = maskedText.replace(JWT_FUZZY, () => {
+      masked.jwt = true;
+      return "<REDACTED_JWT>";
+    });
+
 
     // 3) PEM Private Key 마스킹
     // - 멀티라인 블록 전체를 치환
@@ -214,14 +211,13 @@
     if (isAllowlistedDomain(location.hostname)) return { action: "allow", reason: "allowlisted_domain" };
     if (!secretDetected) return { action: "allow", reason: "no_secret" };
 
-    // 강한 시그널은 무조건 mask (지금 정책)
-    if (regexSignals.pemHeader) return { action: "block", reason: "pem_private_key" }; 
-    // PEM은 마스킹으로 넣는 순간 사용자 경험/보안상 애매해서 block로 두는 게 보통 더 안전함.
+    // 강한 시그널은 무조건 mask
+    if (regexSignals.pemHeader) return { action: "mask", reason: "pem_private_key" }; 
 
     if (regexSignals.awsAccessKey) return { action: "mask", reason: "aws_access_key" };
     if (regexSignals.jwtToken) return { action: "mask", reason: "jwt_token" };
 
-    // 엔트로피만 높은 경우는 마스킹 대신 경고만? → 지금 이슈에서는 allow로 두는 것도 방법
+    // 엔트로피만 높은 경우는 마스킹 대신 경고
     if (riskScore >= 70) return { action: "mask", reason: "high_risk_string" };
 
     return { action: "allow", reason: "low_confidence" };
@@ -234,63 +230,71 @@
    * - 원문 노출 금지
    * - 너무 자주 뜨지 않도록 중복 방지
    */
-  const showToast = (() => {
-    let lastToastAt = 0;
-    let toastEl = null;
-
-    const ensureEl = () => {
-      if (toastEl && document.body.contains(toastEl)) return toastEl;
-
-      toastEl = document.createElement("div");
-      toastEl.setAttribute("data-keyshield-toast", "1");
-      toastEl.style.cssText = `
-        position: fixed;
-        z-index: 2147483647;
-        right: 16px;
-        bottom: 16px;
-        max-width: 360px;
-        padding: 12px 14px;
-        border-radius: 10px;
-        background: rgba(17, 17, 17, 0.92);
-        color: #fff;
-        font-size: 13px;
-        line-height: 1.35;
-        box-shadow: 0 6px 18px rgba(0,0,0,0.25);
-        opacity: 0;
-        transform: translateY(6px);
-        transition: opacity 160ms ease, transform 160ms ease;
-        pointer-events: none;
-        white-space: pre-line;
-      `;
-
-      document.documentElement.appendChild(toastEl);
-      return toastEl;
-    };
-
-    return (message) => {
-      const now = Date.now();
-      // 600ms 이내 연타 방지
-      if (now - lastToastAt < 600) return;
-      lastToastAt = now;
-
-      const el = ensureEl();
-      el.textContent = message;
-
-      // show
-      requestAnimationFrame(() => {
+    const showToast = (() => {
+      let lastToastAt = 0;
+      let toastEl = null;
+      let lastMsg = "";
+    
+      const ensureEl = () => {
+        if (toastEl && document.documentElement.contains(toastEl)) return toastEl;
+    
+        toastEl = document.createElement("div");
+        toastEl.setAttribute("data-keyshield-toast", "1");
+        toastEl.style.cssText = `
+          position: fixed;
+          z-index: 2147483647;
+          right: 16px;
+          bottom: 16px;
+          max-width: 360px;
+          padding: 12px 14px;
+          border-radius: 10px;
+          background: rgba(17, 17, 17, 0.92);
+          color: #fff;
+          font-size: 13px;
+          line-height: 1.35;
+          box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+          opacity: 0;
+          transform: translateY(6px);
+          transition: opacity 160ms ease, transform 160ms ease;
+          pointer-events: none;
+          white-space: pre-line;
+        `;
+    
+        // body가 있으면 body로, 없으면 html로
+        (document.body || document.documentElement).appendChild(toastEl);
+        return toastEl;
+      };
+    
+      return (message) => {
+        const now = Date.now();
+    
+        // 같은 메시지 연타 막기
+        if (now - lastToastAt < 600 && message === lastMsg) return;
+    
+        lastToastAt = now;
+        lastMsg = message;
+    
+        const el = ensureEl();
+        el.textContent = message;
+    
+        // show (rAF가 안 먹을 때 대비해서 2단계)
         el.style.opacity = "1";
         el.style.transform = "translateY(0)";
-      });
+        requestAnimationFrame(() => {
+          el.style.opacity = "1";
+          el.style.transform = "translateY(0)";
+        });
 
-      // hide
-      setTimeout(() => {
-        if (!toastEl) return;
-        toastEl.style.opacity = "0";
-        toastEl.style.transform = "translateY(6px)";
-      }, 2200);
-    };
-  })();
-
+    
+        // hide
+        setTimeout(() => {
+          if (!toastEl) return;
+          toastEl.style.opacity = "0";
+          toastEl.style.transform = "translateY(6px)";
+        }, 2200);
+      };
+    })();
+    
 
   /**
    * 최종 Secret 판정
@@ -309,7 +313,7 @@
       return true;
     }
   
-    // 2) JWT는 entropy까지 같이 본다 (오탐 방지)
+    // 2) JWT는 entropy (오탐 방지)
     if (regexSignals.jwtToken && entropy >= 4.5) {
       return true;
     }
@@ -334,8 +338,22 @@
       const compactText = text.replace(/\s+/g, "");
   
       const regexSignals = detectRegexSignals(normalizedText, compactText);
-      const entropy = calcShannonEntropy(compactText);
-  
+      
+      // REFACT: settimeout 방지를 위해 조건부로 변경
+      // entropy 계산 최적화
+      // JWT 토큰이 있을 때만 계산
+      const sampleForEntropy = (s, max = 2000) => {
+        if (s.length <= max) return s;
+        const half = Math.floor(max / 2);
+        return s.slice(0, half) + s.slice(-half);
+      };
+      
+      const entropy = regexSignals.jwtToken
+        ? calcShannonEntropy(sampleForEntropy(compactText, 2000))
+        : 0;
+      
+
+      
       const riskScore = calcRiskScore({
         length: compactText.length,
         entropy,
