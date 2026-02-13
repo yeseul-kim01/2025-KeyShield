@@ -35,8 +35,25 @@ out/
 # os
 .DS_Store
 
-#
-pdp/*
-.apps/pdp/*
-apps/pdp/*
-apps/pdp
+
+# =========================
+# Java / Spring Boot
+# =========================
+target/
+build/
+out/
+*.class
+*.log
+
+# Gradle
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
