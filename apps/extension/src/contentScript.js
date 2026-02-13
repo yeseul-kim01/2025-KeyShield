@@ -1,5 +1,8 @@
 (() => {
   const LOG_PREFIX = "[KeyShield]";
+  // PDP 서버 주소 (Vite 환경변수)
+  const PDP_BASE_URL = import.meta?.env?.VITE_PDP_BASE_URL || null;
+
 
   /**
    * 간단 로그 헬퍼
