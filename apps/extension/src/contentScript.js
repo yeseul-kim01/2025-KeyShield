@@ -225,75 +225,124 @@
 
 
 
-    /**
-   * 간단 토스트(페이지 내 오버레이)
-   * - 원문 노출 금지
-   * - 너무 자주 뜨지 않도록 중복 방지
-   */
-    const showToast = (() => {
-      let lastToastAt = 0;
-      let toastEl = null;
-      let lastMsg = "";
-    
-      const ensureEl = () => {
-        if (toastEl && document.documentElement.contains(toastEl)) return toastEl;
-    
-        toastEl = document.createElement("div");
-        toastEl.setAttribute("data-keyshield-toast", "1");
-        toastEl.style.cssText = `
-          position: fixed;
-          z-index: 2147483647;
-          right: 16px;
-          bottom: 16px;
-          max-width: 360px;
-          padding: 12px 14px;
-          border-radius: 10px;
-          background: rgba(17, 17, 17, 0.92);
-          color: #fff;
-          font-size: 13px;
-          line-height: 1.35;
-          box-shadow: 0 6px 18px rgba(0,0,0,0.25);
-          opacity: 0;
-          transform: translateY(6px);
-          transition: opacity 160ms ease, transform 160ms ease;
-          pointer-events: none;
-          white-space: pre-line;
-        `;
-    
-        // body가 있으면 body로, 없으면 html로
-        (document.body || document.documentElement).appendChild(toastEl);
-        return toastEl;
-      };
-    
-      return (message) => {
-        const now = Date.now();
-    
-        // 같은 메시지 연타 막기
-        if (now - lastToastAt < 600 && message === lastMsg) return;
-    
-        lastToastAt = now;
-        lastMsg = message;
-    
-        const el = ensureEl();
-        el.textContent = message;
-    
-        // show (rAF가 안 먹을 때 대비해서 2단계)
+  const showToast = (() => {
+    let lastToastAt = 0;
+    let toastEl = null;
+    let lastMsg = "";
+    let hideTimer = null;
+  
+    const ensureEl = () => {
+      if (toastEl && document.documentElement.contains(toastEl)) return toastEl;
+  
+      toastEl = document.createElement("div");
+      toastEl.setAttribute("data-keyshield-toast", "1");
+      toastEl.style.cssText = `
+        position: fixed;
+        z-index: 2147483647;
+        max-width: 360px;
+        padding: 12px 14px;
+        border-radius: 10px;
+        background: rgba(17, 17, 17, 0.92);
+        color: #fff;
+        font-size: 13px;
+        line-height: 1.35;
+        box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+        opacity: 0;
+        transform: translateY(6px);
+        transition: opacity 160ms ease, transform 160ms ease;
+        pointer-events: none;
+        white-space: pre-line;
+      `;
+  
+      (document.body || document.documentElement).appendChild(toastEl);
+      return toastEl;
+    };
+  
+    const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  
+    const positionAboveTarget = (el, target) => {
+      // target이 없으면 fallback (우하단)
+      if (!target || !target.getBoundingClientRect) {
+        el.style.right = "16px";
+        el.style.bottom = "16px";
+        el.style.left = "auto";
+        el.style.top = "auto";
+        return;
+      }
+  
+      const rect = target.getBoundingClientRect();
+      const margin = 10; // 입력창과 토스트 사이 간격
+      const viewportW = window.innerWidth;
+      const viewportH = window.innerHeight;
+  
+      // 토스트 폭을 먼저 대충 잡고(렌더 후 실제 offsetWidth 사용)
+      el.style.left = "0px";
+      el.style.top = "0px";
+      el.style.right = "auto";
+      el.style.bottom = "auto";
+  
+      // 먼저 보이게 만들어서 실제 width/height 계산되게
+      el.style.opacity = "0";
+      el.style.transform = "translateY(6px)";
+  
+      // 레이아웃 계산
+      const toastW = el.offsetWidth || 320;
+      const toastH = el.offsetHeight || 48;
+  
+      // 입력창 중앙 정렬 느낌으로 x 결정
+      const centerX = rect.left + rect.width / 2;
+      let left = centerX - toastW / 2;
+  
+      // 기본은 입력창 위
+      let top = rect.top - toastH - margin;
+  
+      // 위에 공간이 없으면 아래로
+      if (top < 8) {
+        top = rect.bottom + margin;
+      }
+  
+      // 화면 밖으로 나가지 않게 clamp
+      left = clamp(left, 8, viewportW - toastW - 8);
+      top = clamp(top, 8, viewportH - toastH - 8);
+  
+      el.style.left = `${Math.round(left)}px`;
+      el.style.top = `${Math.round(top)}px`;
+    };
+  
+    return (target, message, opts = {}) => {
+      const now = Date.now();
+      const durationMs = typeof opts.durationMs === "number" ? opts.durationMs : 4000;
+  
+      // 같은 메시지 연타 막기 (필요하면 600→300으로 낮춰도 됨)
+      if (now - lastToastAt < 600 && message === lastMsg) return;
+  
+      lastToastAt = now;
+      lastMsg = message;
+  
+      const el = ensureEl();
+      el.textContent = message;
+  
+      // 위치 잡기 (입력창 위)
+      positionAboveTarget(el, target);
+  
+      // show
+      el.style.opacity = "1";
+      el.style.transform = "translateY(0)";
+      requestAnimationFrame(() => {
         el.style.opacity = "1";
         el.style.transform = "translateY(0)";
-        requestAnimationFrame(() => {
-          el.style.opacity = "1";
-          el.style.transform = "translateY(0)";
-        });
-
-    
-        // hide
-        setTimeout(() => {
-          if (!toastEl) return;
-          toastEl.style.opacity = "0";
-          toastEl.style.transform = "translateY(6px)";
-        }, 2200);
-      };
-    })();
+      });
+  
+      // 이전 타이머 제거 후 재설정 (연속 발생 시 유지시간 갱신)
+      if (hideTimer) clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => {
+        if (!toastEl) return;
+        toastEl.style.opacity = "0";
+        toastEl.style.transform = "translateY(6px)";
+      }, durationMs);
+    };
+  })();
+  
     
 
   /**
@@ -393,8 +442,7 @@
   
       // block
       if (action === "block") {
-        showToast("KeyShield: 민감 정보로 의심되어 붙여넣기가 차단되었습니다.");
-        log("paste blocked (secret detected)", {
+        showToast(target, "KeyShield: 민감 정보로 의심되어 붙여넣기가 차단되었습니다.", { durationMs: 5000 });        log("paste blocked (secret detected)", {
           url: location.href,
           length: compactText.length,
           entropy,
@@ -410,8 +458,7 @@
         const { maskedText, masked } = maskSecretsInText(text);
         const inserted = insertTextIntoInput(target, maskedText);
   
-        showToast("KeyShield: 민감 정보로 의심되어 일부가 마스킹 처리되었습니다.");
-  
+        showToast(target, "KeyShield: 민감 정보로 의심되어 일부가 마스킹 처리되었습니다.", { durationMs: 4000 });  
         log("paste masked (secret detected)", {
           url: location.href,
           inserted,
