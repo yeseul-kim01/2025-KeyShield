@@ -20,7 +20,7 @@ public class PolicyService {
                 tenantId,
                 site,
                 action,
-                store.defaultDetectTypes()
+                store.defaultMaskTypes()
         );
     }
 }

@@ -1,5 +1,6 @@
 package dev.keyshield.pdp.policy.store;
 
+import dev.keyshield.pdp.policy.dto.PolicyResponse;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
@@ -35,7 +36,7 @@ public class InMemoryPolicyStore {
         );
     }
 
-    public Set<String> defaultDetectTypes() {
-        return Set.of("aws", "jwt", "pem");
+    public PolicyResponse.MaskTypes defaultMaskTypes() {
+        return new PolicyResponse.MaskTypes(true, true, true);
     }
 }
