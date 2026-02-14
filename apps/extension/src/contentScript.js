@@ -1,156 +1,114 @@
 (() => {
   const LOG_PREFIX = "[KeyShield]";
-  // PDP 서버 주소 (Vite 환경변수)
-  const PDP_BASE_URL = import.meta?.env?.VITE_PDP_BASE_URL || null;
 
+  // PDP 서버 주소 
+  // 1) window.__KEYSHIELD_PDP_URL__ (테스트/주입용)
+  // 2) chrome.storage.local("ks.pdpBaseUrl")
+  // 3) 없으면 null -> overlay + local fallback
+  let PDP_BASE_URL = typeof window !== "undefined" ? window.__KEYSHIELD_PDP_URL__ : null;
 
-  /**
-   * 간단 로그 헬퍼
-   * - 원문 출력 금지
-   * @param {string} message
-   * @param {object} [payload]
-   * @return {void}
-   */
   const log = (message, payload) => {
     if (payload) console.log(LOG_PREFIX, message, payload);
     else console.log(LOG_PREFIX, message);
   };
 
+  /** -------------------------------------------
+   * storage helpers (user/tenant 분리용)
+   * ------------------------------------------- */
+  const storageGet = (key) =>
+    new Promise((resolve) => {
+      try {
+        chrome.storage.local.get([key], (r) => resolve(r?.[key]));
+      } catch (_) {
+        resolve(null);
+      }
+    });
 
-    /**
-   * (임시) 도메인 allowlist
-   * - TODO: 다음 이슈에서 chrome.storage 기반으로 교체
-   */
-  const isAllowlistedDomain = (host) => {
-    // 예: 내부 개발환경/로컬은 허용하고 싶다 이런거
-    const allow = new Set(["localhost", "127.0.0.1"]);
-    return allow.has(host);
+  const getRuntimeIdentity = async () => {
+    const tenantId = (await storageGet("ks.tenantId")) || "t-1";
+    const userId = (await storageGet("ks.userId")) || "u-1";
+    const pdpUrl = (await storageGet("ks.pdpBaseUrl")) || PDP_BASE_URL || null;
+    PDP_BASE_URL = pdpUrl;
+    return { tenantId, userId, pdpUrl };
   };
 
-
-    /**
-   * Secret 마스킹 유틸
-   * - 원문을 저장/전송/로그 출력하지 않음
-   * - 문자열 내 Secret 패턴만 치환하여 "마스킹된 텍스트"를 반환
-   * - 이 함수는 "치환 로직만" 담당 (paste 이벤트 처리와 분리)
-   *
-   * @param {string} rawText
-   * @returns {{ maskedText: string, masked: { aws: boolean, jwt: boolean, pem: boolean } }}
-   */
-  const maskSecretsInText = (rawText) => {
-    if (!rawText) {
-      return { maskedText: "", masked: { aws: false, jwt: false, pem: false } };
-    }
+  /** -------------------------------------------
+   * Secret masking (원문 저장/전송/로그 금지)
+   * ------------------------------------------- */
+  const maskSecretsInText = (rawText, enabledTypes = ["aws", "jwt", "pem"]) => {
+    if (!rawText) return { maskedText: "", masked: { aws: false, jwt: false, pem: false } };
 
     let maskedText = rawText;
+    const masked = { aws: false, jwt: false, pem: false };
 
-    const masked = {
-      aws: false,
-      jwt: false,
-      pem: false,
-    };
+    const has = (t) => enabledTypes.includes(t);
 
-    // 1) AWS Access Key ID 마스킹 (공백/개행 허용)
-    const AWS_ACCESS_KEY_FUZZY = /A\s*K\s*I\s*A(?:\s*[0-9A-Z]){16}/g;
+    if (has("aws")) {
+      // 공백/개행 허용
+      const AWS_ACCESS_KEY_FUZZY = /A\s*K\s*I\s*A(?:\s*[0-9A-Z]){16}/g;
+      maskedText = maskedText.replace(AWS_ACCESS_KEY_FUZZY, () => {
+        masked.aws = true;
+        return "AKIA" + "*".repeat(16);
+      });
+    }
 
-    maskedText = maskedText.replace(AWS_ACCESS_KEY_FUZZY, () => {
-      masked.aws = true;
-      return "AKIA" + "*".repeat(16);
-    });
+    if (has("jwt")) {
+      const JWT_FUZZY = /eyJ[A-Za-z0-9_-]+(?:\s*\.\s*[A-Za-z0-9_-]+){2}/g;
+      maskedText = maskedText.replace(JWT_FUZZY, () => {
+        masked.jwt = true;
+        return "<REDACTED_JWT>";
+      });
+    }
 
-    // 2) JWT 마스킹 (공백/개행 허용)
-    const JWT_FUZZY = /eyJ[A-Za-z0-9_-]+(?:\s*\.\s*[A-Za-z0-9_-]+){2}/g;
-
-    maskedText = maskedText.replace(JWT_FUZZY, () => {
-      masked.jwt = true;
-      return "<REDACTED_JWT>";
-    });
-
-
-    // 3) PEM Private Key 마스킹
-    // - 멀티라인 블록 전체를 치환
-    // - BEGIN/END 헤더가 있을 때만 동작
-    maskedText = maskedText.replace(
-      /-----BEGIN (RSA|EC|DSA)? ?PRIVATE KEY-----[\s\S]*?-----END (RSA|EC|DSA)? ?PRIVATE KEY-----/g,
-      () => {
-        masked.pem = true;
-        return "<REDACTED_PRIVATE_KEY>";
-      }
-    );
+    if (has("pem")) {
+      maskedText = maskedText.replace(
+        /-----BEGIN (RSA|EC|DSA)? ?PRIVATE KEY-----[\s\S]*?-----END (RSA|EC|DSA)? ?PRIVATE KEY-----/g,
+        () => {
+          masked.pem = true;
+          return "<REDACTED_PRIVATE_KEY>";
+        }
+      );
+    }
 
     return { maskedText, masked };
   };
 
-
-    /**
-   * input/textarea에 텍스트를 커서 위치에 삽입
-   * - setRangeText를 우선 사용 (가장 깔끔)
-   * @param {HTMLInputElement|HTMLTextAreaElement} el
-   * @param {string} text
-   * @returns {boolean} 성공 여부
-   */
+  /** -------------------------------------------
+   * insert into input/textarea
+   * ------------------------------------------- */
   const insertTextIntoInput = (el, text) => {
     try {
       const start = typeof el.selectionStart === "number" ? el.selectionStart : el.value.length;
       const end = typeof el.selectionEnd === "number" ? el.selectionEnd : el.value.length;
-
-      // setRangeText는 selection을 유지/이동 옵션 지정 가능
       el.setRangeText(text, start, end, "end");
-
-      // input 이벤트를 발생시켜 React/Vue 등 프레임워크 바인딩도 반영되게
       el.dispatchEvent(new Event("input", { bubbles: true }));
       return true;
-    } catch (err) {
+    } catch (_) {
       return false;
     }
   };
 
-
-  /**
-   * 붙여넣기 대상이 입력 가능한 영역인지 판단
-   * (Out of Scope: contenteditable, role=textbox)
-   * @param {Element} el
-   * @returns {boolean}
-   */
   const isEditableTarget = (el) => {
     if (!el) return false;
-
     const tag = (el.tagName || "").toLowerCase();
-    if (tag === "input" || tag === "textarea") return true;
-
-    // Out of scope는 false 처리
-    return false;
+    return tag === "input" || tag === "textarea";
   };
 
-  /**
-   * 정규식 기반 secret 패턴 탐지
-   * @param {string} normalizedText 공백 정리된 텍스트
-   * @param {string} compactText 공백 제거된 텍스트 (JWT/키 탐지 안정화)
-   * @return {{awsAccessKey:boolean, jwtToken:boolean, pemHeader:boolean}}
-   */
-  const detectRegexSignals = (normalizedText, compactText) => {
+  /** -------------------------------------------
+   * detect + score (detectTypes 기반 동적 적용)
+   * ------------------------------------------- */
+  const detectRegexSignals = (normalizedText, compactText, detectTypes) => {
+    const has = (t) => (detectTypes || []).includes(t);
+
     return {
-      // AWS Access Key ID (AKIA로 시작하는 20자 키)
-      awsAccessKey: /AKIA[0-9A-Z]{16}/.test(compactText),
-
-      // JWT: 줄바꿈/공백이 있어도 탐지되도록 compactText 사용
-      jwtToken: /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(compactText),
-
-      // PEM Private Key Header
-      pemHeader: /-----BEGIN (RSA|EC|DSA)? ?PRIVATE KEY-----/.test(normalizedText),
+      awsAccessKey: has("aws") ? /AKIA[0-9A-Z]{16}/.test(compactText) : false,
+      jwtToken: has("jwt") ? /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(compactText) : false,
+      pemHeader: has("pem") ? /-----BEGIN (RSA|EC|DSA)? ?PRIVATE KEY-----/.test(normalizedText) : false,
     };
   };
 
-  /**
-   * Shannon entropy 계산
-   * - base64/토큰/키 같은 문자열은 보통 entropy가 높음
-   * - 원문 저장/전송/출력 금지
-   * @param {string} text
-   * @returns {number}
-   */
   const calcShannonEntropy = (text) => {
     if (!text || text.length === 0) return 0;
-
     const freq = new Map();
     for (const ch of text) freq.set(ch, (freq.get(ch) || 0) + 1);
 
@@ -160,15 +118,15 @@
       const p = count / len;
       entropy -= p * Math.log2(p);
     }
-
     return Math.round(entropy * 1000) / 1000;
   };
 
-  /**
-   * riskScore 계산 (0~100)
-   * - 지금 단계에서는 "탐지 결과 요약" 목적
-   * - 정책 결정은 다음 단계에서 PDP가 수행
-   */
+  const sampleForEntropy = (s, max = 2000) => {
+    if (s.length <= max) return s;
+    const half = Math.floor(max / 2);
+    return s.slice(0, half) + s.slice(-half);
+  };
+
   const calcRiskScore = ({ length, entropy, regexSignals }) => {
     let score = 0;
 
@@ -186,57 +144,25 @@
     return Math.max(0, Math.min(100, score));
   };
 
+  const isSecretCandidate = ({ regexSignals, entropy, length }) => {
+    if (length < 20) return false;
 
-    /**
-   * 사이트 정책 읽기
-   * - TODO: 다음 이슈에서 chrome.storage.sync/local로 구현
-   */
-  const getSitePolicy = (host) => {
-    return {
-      mode: "mask", // "allow" | "mask" | "block" | "detect-only"
-      maskTypes: { aws: true, jwt: true, pem: true },
-    };
+    if (regexSignals.awsAccessKey || regexSignals.pemHeader) return true;
+    if (regexSignals.jwtToken && entropy >= 4.5) return true;
+
+    return false;
   };
 
-
-
-
-    /**
-   * 정책 결정
-   * - 지금 이슈 범위에서는 기본 정책만 고정
-   * - TODO: 다음 이슈에서 site별 설정 / detect-only / allowlist 등을 붙일 자리
-   *
-   * @param {{secretDetected:boolean, regexSignals:any, riskScore:number, entropy:number, length:number}} ctx
-   * @returns {{ action: "allow" | "mask" | "block", reason: string }}
-   */
-  const decideEnforcement = (ctx) => {
-    const { secretDetected, regexSignals, riskScore } = ctx;
-    if (isAllowlistedDomain(location.hostname)) return { action: "allow", reason: "allowlisted_domain" };
-    if (!secretDetected) return { action: "allow", reason: "no_secret" };
-
-    // 강한 시그널은 무조건 mask
-    if (regexSignals.pemHeader) return { action: "mask", reason: "pem_private_key" }; 
-
-    if (regexSignals.awsAccessKey) return { action: "mask", reason: "aws_access_key" };
-    if (regexSignals.jwtToken) return { action: "mask", reason: "jwt_token" };
-
-    // 엔트로피만 높은 경우는 마스킹 대신 경고
-    if (riskScore >= 70) return { action: "mask", reason: "high_risk_string" };
-
-    return { action: "allow", reason: "low_confidence" };
-  };
-
-
-
+  /** -------------------------------------------
+   * UI: toast + overlay
+   * ------------------------------------------- */
   const showToast = (() => {
-    let lastToastAt = 0;
     let toastEl = null;
-    let lastMsg = "";
     let hideTimer = null;
-  
+
     const ensureEl = () => {
       if (toastEl && document.documentElement.contains(toastEl)) return toastEl;
-  
+
       toastEl = document.createElement("div");
       toastEl.setAttribute("data-keyshield-toast", "1");
       toastEl.style.cssText = `
@@ -256,15 +182,13 @@
         pointer-events: none;
         white-space: pre-line;
       `;
-  
       (document.body || document.documentElement).appendChild(toastEl);
       return toastEl;
     };
-  
+
     const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
-  
+
     const positionAboveTarget = (el, target) => {
-      // target이 없으면 fallback (우하단)
       if (!target || !target.getBoundingClientRect) {
         el.style.right = "16px";
         el.style.bottom = "16px";
@@ -272,71 +196,50 @@
         el.style.top = "auto";
         return;
       }
-  
+
       const rect = target.getBoundingClientRect();
-      const margin = 10; // 입력창과 토스트 사이 간격
+      const margin = 10;
       const viewportW = window.innerWidth;
       const viewportH = window.innerHeight;
-  
-      // 토스트 폭을 먼저 대충 잡고(렌더 후 실제 offsetWidth 사용)
+
       el.style.left = "0px";
       el.style.top = "0px";
       el.style.right = "auto";
       el.style.bottom = "auto";
-  
-      // 먼저 보이게 만들어서 실제 width/height 계산되게
+
+      // 레이아웃 계산 위해 잠깐 렌더 상태 확보
       el.style.opacity = "0";
       el.style.transform = "translateY(6px)";
-  
-      // 레이아웃 계산
+
       const toastW = el.offsetWidth || 320;
       const toastH = el.offsetHeight || 48;
-  
-      // 입력창 중앙 정렬 느낌으로 x 결정
+
       const centerX = rect.left + rect.width / 2;
       let left = centerX - toastW / 2;
-  
-      // 기본은 입력창 위
       let top = rect.top - toastH - margin;
-  
-      // 위에 공간이 없으면 아래로
-      if (top < 8) {
-        top = rect.bottom + margin;
-      }
-  
-      // 화면 밖으로 나가지 않게 clamp
+
+      if (top < 8) top = rect.bottom + margin;
+
       left = clamp(left, 8, viewportW - toastW - 8);
       top = clamp(top, 8, viewportH - toastH - 8);
-  
+
       el.style.left = `${Math.round(left)}px`;
       el.style.top = `${Math.round(top)}px`;
     };
-  
-    return (target, message, opts = {}) => {
-      const now = Date.now();
-      const durationMs = typeof opts.durationMs === "number" ? opts.durationMs : 4000;
-  
-      // 같은 메시지 연타 막기 (필요하면 600→300으로 낮춰도 됨)
-      if (now - lastToastAt < 600 && message === lastMsg) return;
-  
-      lastToastAt = now;
-      lastMsg = message;
-  
+
+    return (target, message, { durationMs = 4500 } = {}) => {
       const el = ensureEl();
       el.textContent = message;
-  
-      // 위치 잡기 (입력창 위)
+
       positionAboveTarget(el, target);
-  
-      // show
+
       el.style.opacity = "1";
       el.style.transform = "translateY(0)";
       requestAnimationFrame(() => {
         el.style.opacity = "1";
         el.style.transform = "translateY(0)";
       });
-  
-      // 이전 타이머 제거 후 재설정 (연속 발생 시 유지시간 갱신)
+
       if (hideTimer) clearTimeout(hideTimer);
       hideTimer = setTimeout(() => {
         if (!toastEl) return;
@@ -345,136 +248,289 @@
       }, durationMs);
     };
   })();
-  
-    
 
-  /**
-   * 최종 Secret 판정
-   * - regex 신호 + entropy 기준을 함께 사용
-   * - 원문 저장/전송/로그 금지
-   */
-  const isSecretCandidate = ({ regexSignals, entropy, length }) => {
-    // 너무 짧으면 컷
-    if (length < 20) return false;
-  
-    // 1) 강한 정규식 시그널은 entropy 무시
-    if (
-      regexSignals.awsAccessKey ||
-      regexSignals.pemHeader
-    ) {
-      return true;
+  const showSystemOverlay = (() => {
+    let overlayEl = null;
+    let isVisible = false;
+
+    const createOverlay = () => {
+      overlayEl = document.createElement("div");
+      overlayEl.setAttribute("data-keyshield-overlay", "1");
+      overlayEl.style.cssText = `
+        position: fixed;
+        inset: 0;
+        z-index: 2147483646;
+        background: rgba(0, 0, 0, 0.35);
+        backdrop-filter: blur(4px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      `;
+
+      const modal = document.createElement("div");
+      modal.style.cssText = `
+        min-width: 320px;
+        max-width: 420px;
+        padding: 24px;
+        border-radius: 16px;
+        background: #ffffff;
+        color: #111;
+        box-shadow: 0 20px 50px rgba(0,0,0,0.25);
+        text-align: center;
+      `;
+
+      modal.innerHTML = `
+        <div style="font-size:18px; font-weight:700; margin-bottom:6px;">KeyShield</div>
+        <div id="ks-overlay-message" style="font-size:14px; line-height:1.45; margin-bottom:14px;">
+          서버 점검 중입니다.
+        </div>
+        <button id="ks-overlay-close"
+          style="padding:8px 14px; border-radius:10px; border:none; background:#111; color:#fff; cursor:pointer;">
+          확인
+        </button>
+      `;
+
+      overlayEl.appendChild(modal);
+      (document.body || document.documentElement).appendChild(overlayEl);
+
+      overlayEl.querySelector("#ks-overlay-close").onclick = () => {
+        overlayEl.style.display = "none";
+        isVisible = false;
+      };
+    };
+
+    const show = (message) => {
+      if (isVisible) return;
+      if (!overlayEl) createOverlay();
+
+      const msgEl = overlayEl.querySelector("#ks-overlay-message");
+      if (msgEl) msgEl.textContent = message;
+
+      overlayEl.style.display = "flex";
+      isVisible = true;
+    };
+
+    return show;
+  })();
+
+  /** -------------------------------------------
+   * PDP calls (current + decide)
+   * - 원문 텍스트 절대 전송 X
+   * - AbortController로 타임아웃
+   * ------------------------------------------- */
+  let hasShownPdpDownOverlay = false;
+
+  const fetchJsonWithTimeout = async (url, options = {}, timeoutMs = 900) => {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      if (!res.ok) throw new Error("http_not_ok");
+      return await res.json();
+    } finally {
+      clearTimeout(t);
     }
-  
-    // 2) JWT는 entropy (오탐 방지)
-    if (regexSignals.jwtToken && entropy >= 4.5) {
-      return true;
-    }
-  
-    return false;
   };
-  
+
+  const fetchPolicyCurrent = async ({ tenantId, userId, site }) => {
+    const { pdpUrl } = await getRuntimeIdentity();
+    if (!pdpUrl) return null;
+
+    const url =
+      `${pdpUrl}/policy/current?tenantId=${encodeURIComponent(tenantId)}` +
+      `&userId=${encodeURIComponent(userId)}` +
+      `&site=${encodeURIComponent(site)}`;
+
+    try {
+      return await fetchJsonWithTimeout(url, {}, 900);
+    } catch (_) {
+      return null;
+    }
+  };
+
+  const postPolicyDecide = async ({ tenantId, userId, site, detectTypes, signals, riskScore, entropy, length }) => {
+    const { pdpUrl } = await getRuntimeIdentity();
+    if (!pdpUrl) return null;
+
+    const url = `${pdpUrl}/policy/decide`;
+    try {
+      return await fetchJsonWithTimeout(
+        url,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tenantId,
+            userId,
+            site,
+            detectTypes,
+            signals,
+            riskScore,
+            entropy,
+            length,
+          }),
+        },
+        1100
+      );
+    } catch (_) {
+      return null;
+    }
+  };
+
+  /** -------------------------------------------
+   * Local fallback enforcement (서버 죽으면)
+   * ------------------------------------------- */
+  const decideEnforcementLocal = ({ secretDetected, regexSignals, riskScore }) => {
+    if (!secretDetected) return { action: "allow", reason: "no_secret" };
+    if (regexSignals.pemHeader) return { action: "mask", reason: "pem_private_key" };
+    if (regexSignals.awsAccessKey) return { action: "mask", reason: "aws_access_key" };
+    if (regexSignals.jwtToken) return { action: "mask", reason: "jwt_token" };
+    if (riskScore >= 70) return { action: "mask", reason: "high_risk_string" };
+    return { action: "allow", reason: "low_confidence" };
+  };
 
   log("content script injected", { url: location.href });
 
   document.addEventListener(
     "paste",
-    (e) => {
+    async (e) => {
       const target = e.target;
       if (!isEditableTarget(target)) return;
-  
+
       const text = e.clipboardData?.getData("text") ?? "";
       if (!text) return;
-  
-      // 정규화
+
+      const site = location.hostname;
+      const { tenantId, userId, pdpUrl } = await getRuntimeIdentity();
+
+      // 1) 서버 정책 먼저 조회 (allow면 탐지 자체 skip)
+      const current = await fetchPolicyCurrent({ tenantId, userId, site });
+
+      if (!pdpUrl && !hasShownPdpDownOverlay) {
+        showSystemOverlay("현재 정책 서버를 설정 중입니다.\n(확장 설정/배포 단계)\n잠시 후 다시 시도해주세요.");
+        hasShownPdpDownOverlay = true;
+      }
+
+      if (!current) {
+        // 서버 죽었거나 아직 미구현: overlay 1회만
+        if (!hasShownPdpDownOverlay) {
+          showSystemOverlay("정책 서버와 연결할 수 없습니다.\n백엔드 서버를 점검 중입니다.");
+          hasShownPdpDownOverlay = true;
+        }
+      } else {
+        if (current.action === "allow") {
+          log("paste allowed (pdp allow)", { site, tenantId, userId });
+          return;
+        }
+      }
+
+      // 2) detectTypes는 서버 기준(없으면 기본값)
+      const detectTypes = current?.detectTypes?.length ? current.detectTypes : ["aws", "jwt", "pem"];
+
+      // 3) 탐지/entropy/score 계산 (detectTypes 기반)
       const normalizedText = text.replace(/\s+/g, " ").trim();
       const compactText = text.replace(/\s+/g, "");
-  
-      const regexSignals = detectRegexSignals(normalizedText, compactText);
-      
-      // REFACT: settimeout 방지를 위해 조건부로 변경
-      // entropy 계산 최적화
-      // JWT 토큰이 있을 때만 계산
-      const sampleForEntropy = (s, max = 2000) => {
-        if (s.length <= max) return s;
-        const half = Math.floor(max / 2);
-        return s.slice(0, half) + s.slice(-half);
-      };
-      
-      const entropy = regexSignals.jwtToken
+
+      const regexSignals = detectRegexSignals(normalizedText, compactText, detectTypes);
+
+      // entropy는 jwt만 계산(성능)
+      const entropy = detectTypes.includes("jwt") && regexSignals.jwtToken
         ? calcShannonEntropy(sampleForEntropy(compactText, 2000))
         : 0;
-      
 
-      
       const riskScore = calcRiskScore({
         length: compactText.length,
         entropy,
         regexSignals,
       });
-  
+
       const secretDetected = isSecretCandidate({
         regexSignals,
         entropy,
         length: compactText.length,
       });
-  
-      // 정책 결정
-      const { action, reason } = decideEnforcement({
-        secretDetected,
-        regexSignals,
+
+      // 4) 서버에 riskScore/시그널 보고 → 중앙 누적/감쇠 + restricted 적용 후 최종 action
+      const decideRes = await postPolicyDecide({
+        tenantId,
+        userId,
+        site,
+        detectTypes,
+        signals: {
+          aws: regexSignals.awsAccessKey,
+          jwt: regexSignals.jwtToken,
+          pem: regexSignals.pemHeader,
+        },
         riskScore,
         entropy,
         length: compactText.length,
       });
-  
-      // allow: 그냥 통과
+
+      let action, reason, restricted;
+
+      if (decideRes?.action) {
+        action = decideRes.action;
+        reason = decideRes.reason || "pdp_decide";
+        restricted = decideRes.restricted || null;
+
+        // restricted 상태면 사용자에게 명확히 알려주기(UX)
+        if (restricted?.active) {
+          showToast(
+            target,
+            `KeyShield: 보안 제한 상태입니다.\n(${restricted.level}) 잠시 후 다시 시도해주세요.`,
+            { durationMs: 6500 }
+          );
+        }
+      } else {
+        // 서버 실패 → 로컬 fallback
+        const local = decideEnforcementLocal({ secretDetected, regexSignals, riskScore });
+        action = local.action;
+        reason = local.reason;
+      }
+
+      // enforce
       if (action === "allow") {
         log("paste allowed", {
-          url: location.href,
-          length: compactText.length,
-          entropy,
-          riskScore,
+          site,
+          tenantId,
+          userId,
           reason,
+          riskScore,
           signals: regexSignals,
+          restricted,
         });
         return;
       }
-  
-      // block / mask: 원본 paste 차단
+
       e.preventDefault();
-  
-      // block
+
       if (action === "block") {
-        showToast(target, "KeyShield: 민감 정보로 의심되어 붙여넣기가 차단되었습니다.", { durationMs: 5000 });        log("paste blocked (secret detected)", {
-          url: location.href,
-          length: compactText.length,
-          entropy,
-          riskScore,
-          reason,
-          signals: regexSignals,
-        });
+        showToast(target, "KeyShield: 민감 정보로 의심되어 붙여넣기가 차단되었습니다.", { durationMs: 5500 });
+        log("paste blocked", { site, tenantId, userId, reason, riskScore, signals: regexSignals, restricted });
         return;
       }
-  
-      // mask
+
       if (action === "mask") {
-        const { maskedText, masked } = maskSecretsInText(text);
+        const { maskedText, masked } = maskSecretsInText(text, detectTypes);
         const inserted = insertTextIntoInput(target, maskedText);
-  
-        showToast(target, "KeyShield: 민감 정보로 의심되어 일부가 마스킹 처리되었습니다.", { durationMs: 4000 });  
-        log("paste masked (secret detected)", {
-          url: location.href,
+
+        showToast(target, "KeyShield: 민감 정보로 의심되어 일부가 마스킹 처리되었습니다.", { durationMs: 4500 });
+
+        log("paste masked", {
+          site,
+          tenantId,
+          userId,
           inserted,
-          length: maskedText.length,
-          entropy,
-          riskScore,
           reason,
-          masked, // {aws, jwt, pem}
+          masked,
+          riskScore,
           signals: regexSignals,
+          restricted,
         });
         return;
       }
     },
     true
-  );  
+  );
 })();
